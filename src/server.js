@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 // 새로운 임포트 추가
 import DatabaseManager from './database/DatabaseManager.js';
 import AuthService from './services/AuthService.js';
+import GameService from './services/GameService.js';
 
 // 환경 변수 로드
 dotenv.config();
@@ -17,6 +18,7 @@ class GameServer {
     constructor() {
         this.app = express();
         this.server = createServer(this.app);
+        this.gameService = null;
         this.io = new SocketIOServer(this.server, {
             cors: {
                 origin: "*",
@@ -41,6 +43,7 @@ class GameServer {
             await this.db.initialize();
             await this.db.createTables();
             await this.db.createInitialData();
+            this.gameService = new GameService(this.db);    
             console.log('✅ 데이터베이스 초기화 완료');
         } catch (error) {
             console.error('❌ 데이터베이스 초기화 실패:', error);
@@ -113,7 +116,9 @@ class GameServer {
         
         // 라우트 등록 (constructor에서 서비스들을 초기화한 후)
         // 이 부분은 서버 시작 후에 추가할 예정
-        
+        this.app.use('/api/auth', createAuthRoutes(this.authService));
+        this.app.use('/api/game', createGameRoutes(this.gameService, this.db));
+
         this.app.use('*', (req, res) => {
             res.status(404).json({
                 error: 'Route not found',
@@ -130,29 +135,44 @@ class GameServer {
         });
     }
     
-    setupSocket() {
-        this.io.on('connection', (socket) => {
-            console.log(`👤 클라이언트 연결: ${socket.id}`);
-            
-            socket.emit('welcome', {
-                message: '서버에 연결되었습니다!',
-                socketId: socket.id,
-                timestamp: new Date().toISOString()
-            });
-            
-            socket.on('ping', (data) => {
-                socket.emit('pong', {
-                    message: 'pong',
-                    timestamp: new Date().toISOString(),
-                    receivedData: data
-                });
-            });
-            
-            socket.on('disconnect', (reason) => {
-                console.log(`👋 클라이언트 연결 해제: ${socket.id} (이유: ${reason})`);
-            });
+    // src/server.js - setupSocket 메서드 수정
+setupSocket() {
+    this.io.on('connection', (socket) => {
+        console.log(`👤 클라이언트 연결: ${socket.id}`);
+        
+        // 환영 메시지
+        socket.emit('welcome', {
+            message: '서버에 연결되었습니다!',
+            socketId: socket.id,
+            timestamp: new Date().toISOString()
         });
-    }
+        
+        // 위치 업데이트
+        socket.on('updateLocation', async (data) => {
+            const { lat, lng } = data;
+            
+            // 주변 상인 찾기
+            const nearbyMerchants = await this.gameService.findNearbyMerchants(lat, lng);
+            socket.emit('nearbyMerchants', nearbyMerchants);
+        });
+        
+        // 룸 참가 (지역별 가격 업데이트)
+        socket.on('joinRoom', (roomId) => {
+            socket.join(roomId);
+            console.log(`${socket.id} joined room: ${roomId}`);
+        });
+        
+        // 가격 업데이트 브로드캐스트 (3시간마다)
+        setInterval(() => {
+            const priceUpdates = this.gameService.getCurrentPrices();
+            this.io.emit('priceUpdate', priceUpdates);
+        }, 3 * 60 * 60 * 1000);
+        
+        socket.on('disconnect', (reason) => {
+            console.log(`👋 클라이언트 연결 해제: ${socket.id} (이유: ${reason})`);
+        });
+    });
+}
     
     async start() {
         try {
